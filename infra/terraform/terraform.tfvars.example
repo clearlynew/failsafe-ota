@@ -1,0 +1,3 @@
+region       = "us-east-1"
+name_prefix  = "failsafe-ota"
+device_count = 3

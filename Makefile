@@ -11,5 +11,20 @@ test-failures:
 
 test-all:
 	$(PY) -m pytest -q
+	
+tf-init:
+	cd infra/terraform && terraform init
+
+tf-apply:
+	cd infra/terraform && terraform apply
+
+tf-destroy:
+	cd infra/terraform && terraform destroy
+test-e2e:
+	FAILSAFE_E2E=1 $(PY) -m pytest -q -v tests/test_e2e_aws.py
+
+.PHONY: test-e2e
+
+.PHONY: tf-init tf-apply tf-destroy
 
 .PHONY: setup test-unit test-failures test-all

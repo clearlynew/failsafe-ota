@@ -57,7 +57,8 @@ def check_invariants(root, jobs, ctx) -> dict:
     exp = ctx["expect"]
     inv["I6"] = (job["status"] == exp["job_status"]
                  and (exp.get("reason") is None or job["details"].get("reason") == exp["reason"]))
-    sh = jobs.get_shadow(THING)
+    # was: sh = jobs.get_shadow(THING)
+    sh = jobs.get_shadow(ctx.get("thing", THING))
     inv["I7"] = bool(sh) and sh["state"]["reported"]["version"] == st["version"]
     return inv
 
@@ -123,7 +124,8 @@ def run_scenario(spec, workdir) -> Result:
 
     res.stderr = "\n".join(r.stderr for r in runs)
     st = slots.load_state(str(root), clean=False)
-    job = jobs.get_job(JOB_ID)
+    # was: job = jobs.get_job(JOB_ID)
+    job = jobs.get_job(ctx.get("job_id", JOB_ID))
     res.observed = {"job_status": job["status"], "reason": job["details"].get("reason"),
                     "version": st["version"], "security_version": st["security_version"]}
     res.invariants = check_invariants(str(root), jobs, ctx)

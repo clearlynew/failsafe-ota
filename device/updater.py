@@ -204,19 +204,32 @@ class Updater:
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--root", required=True)
-    ap.add_argument("--jobs", required=True, help="fake jobs directory")
+    ap.add_argument("--transport", choices=("fake", "aws"), default="fake")
+    ap.add_argument("--jobs", help="fake jobs directory (--transport fake)")
     ap.add_argument("--thing", default="device-001")
     ap.add_argument("--once", action="store_true")
     ap.add_argument("--health-deadline", type=float, default=30.0)
     ap.add_argument("--min-alive", type=float, default=5.0)
     ap.add_argument("--net-retry", type=float, default=30.0)
+    ap.add_argument("--outputs", default="build/tf-outputs.json", help="aws: terraform outputs")
+    ap.add_argument("--creds", default="build/devices", help="aws: dir holding <thing>/device.key etc.")
+    ap.add_argument("--ca", default="build/AmazonRootCA1.pem")
     a = ap.parse_args(argv)
     logging.basicConfig(level=logging.INFO, stream=sys.stderr,
                         format="%(levelname)s %(name)s: %(message)s")
-    from cloud.fake_jobs import FakeJobs
+    if a.transport == "fake":
+        from cloud.fake_jobs import FakeJobs
+        transport = FakeJobs(a.jobs)
+    else:
+        import json
+        from .aws_transport import AwsIotTransport
+        endpoint = json.load(open(a.outputs))["iot_endpoint"]["value"]
+        d = os.path.join(a.creds, a.thing)
+        transport = AwsIotTransport(a.thing, endpoint, os.path.join(d, "device.pem.crt"),
+                                    os.path.join(d, "device.key"), a.ca)
     with open(os.path.join(a.root, "trusted_pubkey.pem"), "rb") as f:
         pub = f.read()
-    u = Updater(a.root, a.thing, FakeJobs(a.jobs), pub,
+    u = Updater(a.root, a.thing, transport, pub,
                 HealthConfig(a.health_deadline, a.min_alive), a.net_retry)
     try:
         u.run_once()

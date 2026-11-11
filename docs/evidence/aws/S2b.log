@@ -1,0 +1,9 @@
+S2b: Truncated image (real AWS)
+job: e2e-S2b-1794409830
+expected: {'job_status': 'FAILED', 'reason': 'SIZE_MISMATCH', 'version': '1.0.0', 'inactive_untouched': True}
+observed: job={'status': 'FAILED', 'details': {'from': '1.0.0', 'reason': 'SIZE_MISMATCH', 'slot': 'B', 'to': '1.1.0'}} version=1.0.0 sv=2
+invariants: {'I2': True, 'I1': True, 'I3': True, 'I4': True, 'I5': True, 'I6': True, 'I7': True}
+result: PASS
+--- device log ---
+ERROR updater: rejected: SIZE_MISMATCH: 1024 != 2048
+INFO updater: reported FAILED {'slot': 'B', 'from': '1.0.0', 'to': '1.1.0', 'reason': 'SIZE_MISMATCH'}
