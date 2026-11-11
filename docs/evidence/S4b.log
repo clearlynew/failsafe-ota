@@ -1,0 +1,8 @@
+S4b: Allowed rollback of version (same security_version)
+expected: {'job_status': 'SUCCEEDED', 'version': '1.0.5', 'security_version': 2}
+observed: {'job_status': 'SUCCEEDED', 'reason': None, 'version': '1.0.5', 'security_version': 2}
+invariants: {'I2': True, 'I1': True, 'I3': True, 'I4': True, 'I5': True, 'I6': True, 'I7': True}
+result: PASS
+--- device log ---
+INFO updater: committed 1.0.5
+INFO updater: reported SUCCEEDED {'slot': 'B', 'from': '1.1.0', 'to': '1.0.5'}

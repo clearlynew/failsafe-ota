@@ -1,0 +1,8 @@
+S8-P4: Power cut at write_done
+expected: {'job_status': 'SUCCEEDED', 'version': '1.1.0'}
+observed: {'job_status': 'SUCCEEDED', 'reason': None, 'version': '1.1.0', 'security_version': 3}
+invariants: {'I2': True, 'I1': True, 'I3': True, 'I4': True, 'I5': True, 'I6': True, 'I7': True}
+result: PASS
+--- device log ---
+INFO updater: committed 1.1.0
+INFO updater: reported SUCCEEDED {'slot': 'B', 'from': '1.0.0', 'to': '1.1.0'}

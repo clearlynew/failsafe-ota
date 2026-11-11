@@ -1,0 +1,91 @@
+# Expected outcome per scenario. The runner executes these and writes docs/RESULTS.md.
+- {id: S1,  name: Good update (baseline),
+   release: {kind: good, version: 1.1.0, security_version: 3},
+   expect: {job_status: SUCCEEDED, version: 1.1.0, security_version: 3}}
+- {id: S2a, name: Tampered image,
+   release: {kind: good, version: 1.1.0, security_version: 3, tamper: flip_image},
+   expect: {job_status: FAILED, reason: HASH_MISMATCH, version: 1.0.0, security_version: 2, inactive_untouched: true}}
+- {id: S2b, name: Truncated image,
+   release: {kind: good, version: 1.1.0, security_version: 3, tamper: truncate_image},
+   expect: {job_status: FAILED, reason: SIZE_MISMATCH, version: 1.0.0, inactive_untouched: true}}
+- {id: S3a, name: Wrong-key signature,
+   release: {kind: good, version: 1.1.0, security_version: 3, tamper: wrong_key},
+   expect: {job_status: FAILED, reason: SIGNATURE_INVALID, version: 1.0.0, inactive_untouched: true}}
+- {id: S3b-missing, name: Missing signature file,
+   release: {kind: good, version: 1.1.0, security_version: 3, tamper: missing_sig},
+   expect: {job_status: FAILED, reason: SIGNATURE_INVALID, version: 1.0.0}}
+- {id: S3b-garbled, name: Corrupt signature file,
+   release: {kind: good, version: 1.1.0, security_version: 3, tamper: garble_sig},
+   expect: {job_status: FAILED, reason: SIGNATURE_INVALID, version: 1.0.0}}
+- {id: S3c-sv, name: Manifest security_version edited after signing,
+   release: {kind: good, version: 1.1.0, security_version: 3, tamper: edit_sv},
+   expect: {job_status: FAILED, reason: SIGNATURE_INVALID, version: 1.0.0, security_version: 2}}
+- {id: S3c-sha, name: Manifest sha256 edited after signing,
+   release: {kind: good, version: 1.1.0, security_version: 3, tamper: edit_sha},
+   expect: {job_status: FAILED, reason: SIGNATURE_INVALID, version: 1.0.0}}
+- {id: S4a, name: Downgrade attack (validly signed, lower security_version),
+   release: {kind: good, version: 0.9.0, security_version: 1},
+   expect: {job_status: FAILED, reason: DOWNGRADE_REJECTED, version: 1.0.0, security_version: 2}}
+- {id: S4b, name: Allowed rollback of version (same security_version),
+   device: {version: 1.1.0, security_version: 2},
+   release: {kind: good, version: 1.0.5, security_version: 2},
+   expect: {job_status: SUCCEEDED, version: 1.0.5, security_version: 2}}
+- {id: S5a, name: Firmware crashes at start,
+   release: {kind: crash_now, version: 1.1.0, security_version: 3},
+   expect: {job_status: FAILED, reason: HEALTH_CHECK_FAILED, version: 1.0.0, security_version: 2}}
+- {id: S5b, name: Firmware crashes mid-trial,
+   release: {kind: crash_later, version: 1.1.0, security_version: 3},
+   expect: {job_status: FAILED, reason: HEALTH_CHECK_FAILED, version: 1.0.0}}
+- {id: S6a, name: New firmware cannot reach cloud,
+   release: {kind: no_cloud, version: 1.1.0, security_version: 3},
+   expect: {job_status: FAILED, reason: CLOUD_UNREACHABLE, version: 1.0.0}}
+- {id: S6b, name: Network drops mid-download (resumes),
+   release: {kind: good, version: 1.1.0, security_version: 3},
+   fault: {net_blackhole: "download_mid:1.5"},
+   expect: {job_status: SUCCEEDED, version: 1.1.0, stderr_contains: "network error, retrying"}}
+- {id: S6c, name: Short outage during trial (tolerated),
+   release: {kind: good, version: 1.1.0, security_version: 3},
+   fault: {net_blackhole: "trial_start:1.5"}, health: {deadline_s: 4, min_alive_s: 1},
+   expect: {job_status: SUCCEEDED, version: 1.1.0, stderr_contains: "heartbeat failed"}}
+- {id: S6d, name: Long outage during trial (rolled back),
+   release: {kind: good, version: 1.1.0, security_version: 3},
+   fault: {net_blackhole: "trial_start:4"}, health: {deadline_s: 2.5, min_alive_s: 1},
+   expect: {job_status: FAILED, reason: CLOUD_UNREACHABLE, version: 1.0.0, stderr_contains: "network error, retrying"}}
+- {id: S7a, name: Firmware hangs and never confirms,
+   release: {kind: hang, version: 1.1.0, security_version: 3},
+   expect: {job_status: FAILED, reason: TRIAL_TIMEOUT, version: 1.0.0}}
+- {id: S7bc, name: Device disappears; job TIMED_OUT; device returns and recovers,
+   release: {kind: good, version: 1.1.0, security_version: 3},
+   fault: {crash: trial_mid}, job_timeout_s: 60, sequence: device_disappears,
+   expect: {job_status: TIMED_OUT, version: 1.0.0, stderr_contains: "rejected (tolerated)"}}
+# S8: power cut at each install stage (one trial attempt)
+- {id: S8-P1,  name: Power cut at download_mid,
+   release: {kind: good, version: 1.1.0, security_version: 3}, fault: {crash: download_mid},
+   expect: {job_status: SUCCEEDED, version: 1.1.0}}
+- {id: S8-P2,  name: Power cut at download_done,
+   release: {kind: good, version: 1.1.0, security_version: 3}, fault: {crash: download_done},
+   expect: {job_status: SUCCEEDED, version: 1.1.0}}
+- {id: S8-P3,  name: Power cut at write_mid,
+   release: {kind: good, version: 1.1.0, security_version: 3}, fault: {crash: write_mid},
+   expect: {job_status: SUCCEEDED, version: 1.1.0}}
+- {id: S8-P4,  name: Power cut at write_done,
+   release: {kind: good, version: 1.1.0, security_version: 3}, fault: {crash: write_done},
+   expect: {job_status: SUCCEEDED, version: 1.1.0}}
+- {id: S8-P5,  name: Power cut at flip_tmp_written,
+   release: {kind: good, version: 1.1.0, security_version: 3}, fault: {crash: flip_tmp_written},
+   expect: {job_status: SUCCEEDED, version: 1.1.0}}
+- {id: S8-P6,  name: Power cut at post_flip,
+   release: {kind: good, version: 1.1.0, security_version: 3}, fault: {crash: post_flip},
+   expect: {job_status: SUCCEEDED, version: 1.1.0}}
+- {id: S8-P7,  name: Power cut at trial_mid,
+   release: {kind: good, version: 1.1.0, security_version: 3}, fault: {crash: trial_mid},
+   expect: {job_status: FAILED, reason: TRIAL_INTERRUPTED, version: 1.0.0}}
+- {id: S8-P8,  name: Power cut at health_passed,
+   release: {kind: good, version: 1.1.0, security_version: 3}, fault: {crash: health_passed},
+   expect: {job_status: FAILED, reason: TRIAL_INTERRUPTED, version: 1.0.0}}
+- {id: S8-P9,  name: Power cut at commit_tmp_written,
+   release: {kind: good, version: 1.1.0, security_version: 3}, fault: {crash: commit_tmp_written},
+   expect: {job_status: FAILED, reason: TRIAL_INTERRUPTED, version: 1.0.0}}
+- {id: S8-P10, name: Power cut at post_commit,
+   release: {kind: good, version: 1.1.0, security_version: 3}, fault: {crash: post_commit},
+   expect: {job_status: SUCCEEDED, version: 1.1.0, security_version: 3}}
