@@ -95,3 +95,21 @@ def test_rejects_bad_version(aws):
     kms, s3, iot = aws
     with pytest.raises(ValueError):
         pub.publish(OUT, "1.1.0/../x", 3, s3=s3, iot=iot, signer=KmsSigner("kid", client=kms))
+        
+        
+def test_rollout_and_abort_config(aws):
+    kms, s3, iot = aws
+    pub.publish(OUT, "2.0.0", 3, group="fleet-a", s3=s3, iot=iot,
+                signer=KmsSigner("kid", client=kms), max_per_minute=4,
+                abort_threshold=20, abort_min_executed=5)
+    job = iot.jobs[0]
+    assert job["jobExecutionsRolloutConfig"] == {"maximumPerMinute": 4}
+    assert job["abortConfig"]["criteriaList"] == [{
+        "failureType": "ALL", "action": "CANCEL",
+        "thresholdPercentage": 20.0, "minNumberOfExecutedThings": 5}]
+
+
+def test_no_rollout_or_abort_by_default(aws):
+    kms, s3, iot = aws
+    pub.publish(OUT, "1.1.0", 3, s3=s3, iot=iot, signer=KmsSigner("kid", client=kms))
+    assert "abortConfig" not in iot.jobs[0] and "jobExecutionsRolloutConfig" not in iot.jobs[0]

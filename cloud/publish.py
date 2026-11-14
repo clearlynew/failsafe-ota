@@ -37,7 +37,8 @@ def job_document(bucket: str, version: str) -> dict:
 
 def publish(out, version, security_version, kind="good", tamper=None, thing="device-001",
             group=None, timeout_min=None, region="us-east-1", job_id=None, expires_s=3600,
-            s3=None, iot=None, signer=None) -> str:
+            s3=None, iot=None, signer=None, max_per_minute=None, abort_threshold=None,
+            abort_min_executed=5) -> str:
     if not re.fullmatch(r"[0-9A-Za-z.\-]+", version):
         raise ValueError("bad version string")
     if s3 is None or iot is None:
@@ -60,6 +61,13 @@ def publish(out, version, security_version, kind="good", tamper=None, thing="dev
                   presignedUrlConfig={"roleArn": out["presign_role_arn"], "expiresInSec": expires_s})
     if timeout_min:
         kwargs["timeoutConfig"] = {"inProgressTimeoutInMinutes": timeout_min}
+    if max_per_minute:      # pace: how many devices per minute are handed the job
+        kwargs["jobExecutionsRolloutConfig"] = {"maximumPerMinute": max_per_minute}
+    if abort_threshold:     # blast radius: cancel the job when failures cross the threshold
+        kwargs["abortConfig"] = {"criteriaList": [{
+            "failureType": "ALL", "action": "CANCEL",
+            "thresholdPercentage": float(abort_threshold),
+            "minNumberOfExecutedThings": abort_min_executed}]}
     iot.create_job(**kwargs)
     return job_id
 
@@ -90,6 +98,9 @@ def main(argv=None) -> int:
     p.add_argument("--thing", default="device-001")
     p.add_argument("--group", default=None, help="target a thing group instead of one thing")
     p.add_argument("--timeout-min", type=int, default=None)
+    p.add_argument("--max-per-minute", type=int, default=None)
+    p.add_argument("--abort-threshold", type=float, default=None, help="percent")
+    p.add_argument("--abort-min-executed", type=int, default=5)
     sub.add_parser("export-pubkey")
     v = sub.add_parser("verify-remote")
     v.add_argument("--version", required=True)
@@ -101,7 +112,9 @@ def main(argv=None) -> int:
         print("wrote", PUBKEY)
     elif a.cmd == "publish":
         job_id = publish(out, a.version, a.security_version, a.kind, a.tamper, a.thing,
-                         a.group, a.timeout_min, a.region)
+                         a.group, a.timeout_min, a.region,
+                         max_per_minute=a.max_per_minute, abort_threshold=a.abort_threshold,
+                         abort_min_executed=a.abort_min_executed)
         print("created job", job_id)
     else:
         m = verify_remote(out, a.version, region=a.region)

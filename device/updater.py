@@ -191,6 +191,18 @@ class Updater:
         faults.maybe_crash("post_flip")
         self.boot()                                  # runs the trial, commits or rolls back
 
+    def watch(self, seconds: float, interval: float = 3.0):
+        """Keep polling for jobs (a staged rollout hands devices their job over time)."""
+        self.boot()
+        end = time.monotonic() + seconds
+        while time.monotonic() < end:
+            job = self._retry(lambda: self.t.start_next(self.thing))
+            if job:
+                self.process_job(job)
+            else:
+                time.sleep(interval)
+        self._sync_shadow()
+
     def run_once(self):
         self.boot()
         for _ in range(10):
@@ -208,6 +220,8 @@ def main(argv=None) -> int:
     ap.add_argument("--jobs", help="fake jobs directory (--transport fake)")
     ap.add_argument("--thing", default="device-001")
     ap.add_argument("--once", action="store_true")
+    ap.add_argument("--watch", type=float, default=None, help="keep polling for this many seconds")
+    ap.add_argument("--poll-interval", type=float, default=3.0)
     ap.add_argument("--health-deadline", type=float, default=30.0)
     ap.add_argument("--min-alive", type=float, default=5.0)
     ap.add_argument("--net-retry", type=float, default=30.0)
@@ -232,7 +246,10 @@ def main(argv=None) -> int:
     u = Updater(a.root, a.thing, transport, pub,
                 HealthConfig(a.health_deadline, a.min_alive), a.net_retry)
     try:
-        u.run_once()
+        if a.watch:
+            u.watch(a.watch, a.poll_interval)
+        else:
+            u.run_once()
     except NetworkError:
         log.error("cloud unreachable; exiting")
         return 2

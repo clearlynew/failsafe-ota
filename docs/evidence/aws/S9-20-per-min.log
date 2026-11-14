@@ -1,0 +1,10 @@
+S9: bad release across 20 devices (real AWS)
+job: s9-1794645434
+config: 20/min, abort at 20.0% after 5 executed, fw kind=crash_now
+job final status: CANCELED after 21s
+devices exposed to the bad image: 9 / 20
+failed executions: 9 reasons=['HEALTH_CHECK_FAILED'], avg start-to-rollback report: 5.7s
+devices left on bad image: 0 []
+PASS: job aborted (CANCELED)
+PASS: fewer than all devices exposed
+PASS: no device left on the bad image

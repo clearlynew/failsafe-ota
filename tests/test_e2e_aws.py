@@ -10,7 +10,7 @@ import os
 import subprocess
 import sys
 import time
-
+import math
 import pytest
 import yaml
 
@@ -25,10 +25,12 @@ pytestmark = pytest.mark.skipif(os.environ.get("FAILSAFE_E2E") != "1",
 THING = "device-001"
 TERMINAL = {"SUCCEEDED", "FAILED", "REJECTED", "TIMED_OUT", "CANCELED", "REMOVED"}
 EVIDENCE = ROOT / "docs" / "evidence" / "aws"
+# No-fault scenarios, plus the fault ones worth proving through real Jobs: network drops
+# (S6b-d), the device vanishing until AWS times the job out (S7b/c), and power cuts P4/P7/P10.
+AWS_FAULT_IDS = {"S6b", "S6c", "S6d", "S7bc", "S8-P4", "S8-P7", "S8-P10"}
 SPECS = [s for s in yaml.safe_load((ROOT / "tests" / "scenarios.yaml").read_text())
-         if "fault" not in s and "job_timeout_s" not in s]
-
-
+         if ("fault" not in s and "job_timeout_s" not in s) or s["id"] in AWS_FAULT_IDS]
+         
 class AwsView:
     """Looks like FakeJobs to harness.check_invariants, but reads real AWS state."""
     def __init__(self, iot, iot_data, job_id):
@@ -80,7 +82,7 @@ def _wait(fn, seconds, what):
 
 @pytest.mark.parametrize("spec", SPECS, ids=[s["id"] for s in SPECS])
 def test_scenario_on_aws(spec, aws, tmp_path):
-    rel, exp = spec["release"], spec["expect"]
+    rel, exp, fault = spec["release"], spec["expect"], spec.get("fault", {})
     dev = spec.get("device", {"version": "1.0.0", "security_version": 2})
     root, env = tmp_path / "device", dict(os.environ, PYTHONPATH=str(ROOT))
     subprocess.run([sys.executable, "-m", "device.provision", "--root", str(root),
@@ -90,20 +92,43 @@ def test_scenario_on_aws(spec, aws, tmp_path):
     initial_fw = build_firmware("good", dev["version"])
     inactive_before = slots.sha256_file(slots.slot_fw(str(root), "B"))
 
+    timeout_min = math.ceil(spec["job_timeout_s"] / 60) if "job_timeout_s" in spec else None
     job_id = pub.publish(aws["out"], rel["version"], rel["security_version"], rel["kind"],
                          rel.get("tamper"), thing=THING, region=aws["region"],
+                         timeout_min=timeout_min,
                          job_id=f"e2e-{spec['id']}-{int(time.time())}")
     view = AwsView(aws["iot"], aws["iot_data"], job_id)
+    h = spec.get("health", {})
+
+    def run_device(fault_env=None):
+        return subprocess.run(
+            [sys.executable, "-m", "device.updater", "--transport", "aws", "--thing", THING,
+             "--root", str(root), "--once", "--health-deadline", str(h.get("deadline_s", 8)),
+             "--min-alive", str(h.get("min_alive_s", 2)), "--net-retry", "20"],
+            cwd=ROOT, env=dict(env, **(fault_env or {})), capture_output=True, text=True,
+            timeout=180)
+
     try:
         # job creation is asynchronous: wait until the device's execution exists
         _wait(lambda: aws["iot"].describe_job_execution(jobId=job_id, thingName=THING),
               30, "job execution to appear")
-        h = spec.get("health", {})
-        proc = subprocess.run(
-            [sys.executable, "-m", "device.updater", "--transport", "aws", "--thing", THING,
-             "--root", str(root), "--once", "--health-deadline", str(h.get("deadline_s", 8)),
-             "--min-alive", str(h.get("min_alive_s", 2)), "--net-retry", "20"],
-            cwd=ROOT, env=env, capture_output=True, text=True, timeout=180)
+        fault_env = {}
+        if fault.get("crash"):
+            fault_env["FAILSAFE_FAULT"] = fault["crash"]
+        if fault.get("net_blackhole"):
+            fault_env["FAILSAFE_NET_BLACKHOLE"] = fault["net_blackhole"]
+        procs, failures = [run_device(fault_env)], []
+        if fault.get("crash"):
+            if procs[0].returncode != 137:
+                failures.append(f"crash fault {fault['crash']} never fired (rc={procs[0].returncode})")
+            if spec.get("sequence") == "device_disappears":   # S7b: device stays dead
+                _wait(lambda: view.get_job()["status"] == "TIMED_OUT", 400,
+                      "AWS to time the job out (timeoutConfig)")
+            for _ in range(3):                                 # device comes back
+                procs.append(run_device())
+                if view.get_job()["status"] in TERMINAL:
+                    break
+        stderr = "\n".join(p.stderr for p in procs)
 
         st = slots.load_state(str(root), clean=False)
         try:   # shadow updates are asynchronous: wait until it reflects the device
@@ -121,14 +146,14 @@ def test_scenario_on_aws(spec, aws, tmp_path):
         inv = check_invariants(str(root), view, ctx)
         job = view.get_job()
 
-        failures = [f"invariant {k} failed" for k, v in inv.items() if not v]
+        failures += [f"invariant {k} failed" for k, v in inv.items() if not v]
         for k in ("version", "security_version"):
             if k in exp and exp[k] != st[k]:
                 failures.append(f"{k}: expected {exp[k]!r}, got {st[k]!r}")
         if exp.get("inactive_untouched") and \
                 slots.sha256_file(slots.slot_fw(str(root), "B")) != inactive_before:
             failures.append("inactive slot was modified")
-        if exp.get("stderr_contains") and exp["stderr_contains"] not in proc.stderr:
+        if exp.get("stderr_contains") and exp["stderr_contains"] not in stderr:
             failures.append(f"log missing {exp['stderr_contains']!r}")
 
         EVIDENCE.mkdir(parents=True, exist_ok=True)
@@ -136,8 +161,8 @@ def test_scenario_on_aws(spec, aws, tmp_path):
             f"{spec['id']}: {spec['name']} (real AWS)\njob: {job_id}\nexpected: {exp}\n"
             f"observed: job={job} version={st['version']} sv={st['security_version']}\n"
             f"invariants: {inv}\nresult: {'PASS' if not failures else 'FAIL'}\n"
-            f"--- device log ---\n{proc.stderr.strip()}\n")
-        assert not failures, f"{failures}\nobserved job={job}\n{proc.stderr[-1500:]}"
+            f"--- device log ---\n{stderr.strip()}\n")
+        assert not failures, f"{failures}\nobserved job={job}\n{stderr[-1500:]}"
     finally:  # never leave our own job active for the next scenario
         try:
             if view.get_job()["status"] not in TERMINAL:

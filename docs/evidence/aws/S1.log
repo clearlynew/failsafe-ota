@@ -1,5 +1,5 @@
 S1: Good update (baseline) (real AWS)
-job: e2e-S1-1794409796
+job: e2e-S1-1794635794
 expected: {'job_status': 'SUCCEEDED', 'version': '1.1.0', 'security_version': 3}
 observed: job={'status': 'SUCCEEDED', 'details': {'from': '1.0.0', 'slot': 'B', 'to': '1.1.0'}} version=1.1.0 sv=3
 invariants: {'I2': True, 'I1': True, 'I3': True, 'I4': True, 'I5': True, 'I6': True, 'I7': True}
