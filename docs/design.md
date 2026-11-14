@@ -7,6 +7,8 @@
 
 **Stack:** Python (`awsiotsdk`, `boto3`, `cryptography`, `pytest`), AWS IoT Core, IoT Jobs, Device Shadow, S3, KMS (asymmetric signing), Terraform.
 
+**Status:** built and tested. 28 local scenarios, 21 scenarios against real AWS, and the 20-device fleet runs all pass. Numbers are generated into [RESULTS.md](RESULTS.md) (this is a design document, so it does not repeat them). Section 15 lists where the build differs from the original plan.
+
 ---
 
 ## 1. Goals and non-goals
@@ -27,7 +29,7 @@
 
 ## 2. Failure testing is the centrepiece
 
-The success path (S1) is one row in a table of about 35 cases. The README leads with the failure results matrix, not a happy-path demo.
+The success path (S1) is one row in a table of 28 local cases, 21 of which also run against real AWS. The README leads with the failure results matrix, not a happy-path demo.
 
 ### 2.1 Required demonstrations
 
@@ -36,7 +38,7 @@ The success path (S1) is one row in a table of about 35 cases. The README leads 
 | Tampered firmware rejected | S2a, S2b | `HASH_MISMATCH` / `SIZE_MISMATCH`; inactive slot unchanged; job FAILED |
 | Invalid signatures rejected | S3a, S3b, S3c | `SIGNATURE_INVALID`; manifest never trusted |
 | Downgrade attempts rejected | S4a (S4b shows the allowed case) | `DOWNGRADE_REJECTED`; `security_version` unchanged |
-| Firmware crashes and rolls back | S5a, S5b | `ROLLED_BACK`; shadow shows old version |
+| Firmware crashes and rolls back | S5a, S5b | job FAILED `HEALTH_CHECK_FAILED`; old slot active again; shadow shows old version |
 | Device loses cloud connectivity | S6a, S6b, S6c, S6d | rollback `CLOUD_UNREACHABLE`; resumed download; tolerated blip |
 | Device disappears during an update | S7a, S7b, S7c | rollback on deadline; job `TIMED_OUT`; clean recovery on return |
 | Power interruption at different stages | S8 P1 to P10 | per-point after-restart table (2.6) |
@@ -47,11 +49,11 @@ The success path (S1) is one row in a table of about 35 cases. The README leads 
 ```
             +--------------------------------+
             | L3: end-to-end on AWS          |  real IoT Jobs, KMS, S3, Terraform infra
-            |     ~15 cases, minutes         |  (manual / pre-release)
+            |     21 cases, minutes          |  (manual / pre-release)
             +--------------------------------+
         +--------------------------------------+
         | L2: scenario matrix, local           |  fake Jobs transport + fault injection
-        |     ~35 cases, seconds               |  runs in CI on every push
+        |     28 cases, ~35 secs               |  runs in CI on every push
         +--------------------------------------+
     +------------------------------------------------+
     | L1: unit tests                                 |  verify.py, canonical manifest,
@@ -59,23 +61,22 @@ The success path (S1) is one row in a table of about 35 cases. The README leads 
     +------------------------------------------------+
 ```
 
-- **L2 is where the full matrix lives.** Every scenario and all 10 crash points run against a fake Jobs transport, so the whole matrix finishes in seconds and can run in CI.
-- **L3 proves the AWS integration.** It runs S1 to S7 and S9 for real, plus a representative subset of S8 (P4, P7, P10) through real IoT Jobs.
+- **L2 is where the full matrix lives.** Every scenario and all 10 crash points run against a file-backed fake Jobs transport, so the whole matrix finishes in well under a minute and runs in CI.
+- **L3 proves the AWS integration** (opt-in: `FAILSAFE_E2E=1`). It runs every scenario that needs no injected fault, plus S6b to S6d, S7b/S7c and the S8 subset P4, P7, P10 (21 in all), and S9 separately as `scripts/fleet_demo.py`. Jobs, signing, S3 and Shadow are real; the S6 network faults are injected inside the device's own transport, not as real packet loss.
 
 ### 2.3 Fault injection
 
 Faults are injected deterministically at named points instead of with timing races.
 
 ```python
-# device/faults.py   (test-only hooks; inert unless FAILSAFE_FAULT is set)
-maybe_crash("write_mid")            # os._exit(137) at a named point: simulated power cut
-with net_fault(blackhole_s=15):     # transport drops everything for N seconds
-    ...
+# device/faults.py   (test-only hooks; inert unless an environment variable is set)
+maybe_crash("write_mid")            # FAILSAFE_FAULT=write_mid: os._exit(137), a simulated power cut
+net_checkpoint("download_mid")      # FAILSAFE_NET_BLACKHOLE=download_mid:1.5: drop all network I/O for 1.5 s
 ```
 
 - `maybe_crash(point)` calls `os._exit`, which skips `finally` blocks and Python-level buffers, approximating an abrupt power cut at *process* level.
 - **Known limitation:** killing a process does not discard the OS page cache the way a real power loss can discard un-fsynced data. A process kill therefore proves the *ordering* of writes and the commit point, but not durability. Stretch goal: a test-only file layer that drops writes not followed by `fsync`.
-- Fault hooks are never part of a "production" device path; they only activate through the environment variable.
+- Fault hooks are never part of a "production" device path; they only activate through those environment variables.
 
 ### 2.4 Invariants (checked after every scenario)
 
@@ -84,8 +85,8 @@ Every scenario, whatever its expected outcome, must also satisfy these. A scenar
 | # | Invariant |
 |---|---|
 | I1 | The active slot's image hash equals `active_image_sha256` in state (the device could run it). |
-| I2 | `state.json` parses and is a valid state; leftover `.tmp` files are never trusted. |
-| I3 | No committed image has ever failed signature verification. |
+| I2 | `state.json` parses after every crash and at the end of the run, and leftover `.tmp` files are gone after the restart (never trusted). |
+| I3 | The active image is one the trusted key signed (or the device's initial image); a tampered or unsigned image is never active. |
 | I4 | `security_version` never decreases. |
 | I5 | After one restart cycle the device is not stuck in `TRIAL`. |
 | I6 | The job execution reaches the expected terminal status and reason (or is retried). |
@@ -93,7 +94,7 @@ Every scenario, whatever its expected outcome, must also satisfy these. A scenar
 
 ### 2.5 Scenario catalog
 
-Expected outcomes are declared in `tests/scenarios.yaml`; the runner executes them and generates `docs/RESULTS.md`.
+Expected outcomes are declared in `tests/scenarios.yaml`. `tests/run_scenarios.py` (local) and `tests/test_e2e_aws.py` (AWS) execute them and write evidence logs; `scripts/make_results.py` generates `docs/RESULTS.md` from those logs.
 
 | ID | Scenario | How it is injected | Expected device result | Expected job result |
 |---|---|---|---|---|
@@ -101,12 +102,12 @@ Expected outcomes are declared in `tests/scenarios.yaml`; the runner executes th
 | S2a | Tampered image | Flip bytes in `fw.bin` after signing | Never written; old slot active | FAILED `HASH_MISMATCH` |
 | S2b | Truncated image | Cut `fw.bin` short | Rejected before install | FAILED `SIZE_MISMATCH` |
 | S3a | Wrong-key signature | Sign manifest with another key | Manifest not trusted | FAILED `SIGNATURE_INVALID` |
-| S3b | Missing or corrupt signature file | Delete or garble `manifest.sig` | Manifest not trusted | FAILED `SIGNATURE_INVALID` |
-| S3c | Manifest edited after signing | Change `security_version` or `sha256` in the manifest | Signature check fails | FAILED `SIGNATURE_INVALID` |
+| S3b | Missing or corrupt signature file (`S3b-missing`, `S3b-garbled`) | Delete or garble `manifest.sig` | Manifest not trusted | FAILED `SIGNATURE_INVALID` |
+| S3c | Manifest edited after signing (`S3c-sv`, `S3c-sha`) | Change `security_version` or `sha256` in the manifest | Signature check fails | FAILED `SIGNATURE_INVALID` |
 | S4a | Downgrade attack | Validly signed release with lower `security_version` | Rejected | FAILED `DOWNGRADE_REJECTED` |
 | S4b | Allowed rollback of `version` | Older `version`, same `security_version` | Installed (policy allows it) | SUCCEEDED |
 | S5a | Firmware crashes at start | New fw exits immediately | Rolled back | FAILED `HEALTH_CHECK_FAILED` |
-| S5b | Firmware crashes mid-trial | New fw exits after 3 s | Rolled back | FAILED `HEALTH_CHECK_FAILED` |
+| S5b | Firmware crashes mid-trial | New fw reports healthy, then exits before the minimum-alive window ends | Rolled back | FAILED `HEALTH_CHECK_FAILED` |
 | S6a | New fw cannot reach cloud | Fw skips IoT connection | Rolled back | FAILED `CLOUD_UNREACHABLE` |
 | S6b | Network drops mid-download | `net_fault` during download | Resumes or retries; no corrupt slot | SUCCEEDED after retry |
 | S6c | Short outage during trial | Blackhole shorter than trial deadline | Health gate retries; commits | SUCCEEDED |
@@ -116,6 +117,8 @@ Expected outcomes are declared in `tests/scenarios.yaml`; the runner executes th
 | S7c | Dead device returns after timeout | Restart device after S7b | Rolls back unconfirmed trial; tolerates rejected status update | stays `TIMED_OUT` |
 | S8 P1 to P10 | Power cut at each install stage | `maybe_crash(point)` | See 2.6 | See 2.6 |
 | S9 | Bad release across 20 devices | Buggy fw, slow rollout, abort threshold | Few devices exposed | Job aborted (`CANCELED`) |
+
+S7b and S7c run as one sequence (`S7bc`). S9 runs on AWS only. The local matrix therefore has 28 cases, counted in `tests/scenarios.yaml`, which is the source of truth.
 
 ### 2.6 Power interruption at each installation stage (S8)
 
@@ -137,9 +140,9 @@ Each point is a named crash location followed by a device restart. Trial policy:
 P7 to P9 deliberately roll back a firmware that may have been fine. That is a documented tradeoff (decision 6): a power cut during trial costs one retry, in exchange for never committing something unconfirmed.
 
 ### 2.7 Test outputs
-- `docs/RESULTS.md` and `results.json`, generated by `make test-failures`.
-- A terminal recording of the full failure run, used as the README demo.
-- A per-scenario log excerpt in `docs/evidence/` (for example the `SIGNATURE_INVALID` line and the unchanged slot hash).
+- Evidence logs, one per scenario: `docs/evidence/<id>.log` (local, from `make test-failures`) and `docs/evidence/aws/<id>.log` (real AWS, from `make test-e2e` and `scripts/fleet_demo.py`). Each holds the expected and observed outcome, the invariants, and the device's own log lines.
+- `docs/RESULTS.md` and the README headline numbers, generated from those logs by `make results`. Nothing is typed by hand; a missing log shows as "not run".
+- An optional terminal recording of the local failure run (`make demo`, stored as `docs/demo.cast`).
 
 ---
 
@@ -209,6 +212,11 @@ P7 to P9 deliberately roll back a firmware that may have been fine. That is a do
 
 **Invariant:** `state.json` is the only thing that decides which slot runs, and it changes in exactly one atomic step (write temp file, `fsync`, `os.replace`, `fsync` directory). Everything before that step touches only the inactive slot.
 
+### State file
+`state.json` holds: `active_slot`, `version`, `security_version`, `active_image_sha256`, `status` (`STABLE` or `TRIAL`), `trial_attempts_left`, plus two fields added during the build:
+- `previous`: the slot, version and hash to roll back to, set when a trial starts.
+- `pending_job`: the job ID, versions, the security version to apply at commit, and the **result** (`SUCCEEDED`, or `FAILED` with a reason). Recording the result in the same atomic write as the commit or rollback means a restart can always report the right outcome to the job, even if the first report was lost (P10) or the trial was interrupted (P7 to P9).
+
 ### Update state machine
 
 ```
@@ -242,8 +250,8 @@ P7 to P9 deliberately roll back a firmware that may have been fine. That is a do
 
 ### Update flow (happy path)
 1. `publish.py` builds firmware vN, writes the manifest, signs it with KMS, uploads to S3, and creates an IoT Job.
-2. IoT Jobs notifies the device (`notify-next`); the device calls `start-next` and receives the job document.
-3. Device downloads the manifest, signature, and image through presigned URLs.
+2. The device asks for work with `start-next` (it polls; it does not subscribe to `notify-next`) and receives the job document. A job already `IN_PROGRESS` for the device is returned again, which is how an interrupted update is retried after a restart.
+3. Device downloads the manifest, signature, and image through presigned URLs, in 512-byte HTTP range requests so a dropped connection resumes where it stopped.
 4. Device verifies in order: manifest signature, `security_version >= stored`, image size, image SHA-256.
 5. Device writes the image to the inactive slot, then **reads it back and re-hashes it** before trusting it.
 6. Device flips `state.json` to the new slot with `status=TRIAL`.
@@ -283,20 +291,20 @@ The job needs a `presignedUrlConfig` (role ARN and expiry) so IoT can substitute
 ```json
 { "reason": "SIGNATURE_INVALID", "slot": "B", "from": "1.0.0", "to": "1.1.0" }
 ```
-Reason codes: `SIGNATURE_INVALID`, `HASH_MISMATCH`, `SIZE_MISMATCH`, `DOWNGRADE_REJECTED`, `HEALTH_CHECK_FAILED`, `CLOUD_UNREACHABLE`, `TRIAL_TIMEOUT`, `TRIAL_INTERRUPTED`.
+Reason codes: `SIGNATURE_INVALID`, `HASH_MISMATCH`, `SIZE_MISMATCH`, `DOWNGRADE_REJECTED`, `HEALTH_CHECK_FAILED`, `CLOUD_UNREACHABLE`, `TRIAL_TIMEOUT`, `TRIAL_INTERRUPTED`, plus `MANIFEST_INVALID` (signed but malformed, or version differs from the job) and `DOWNLOAD_FAILED` (artifact missing or unreadable). On success `statusDetails` carries only `slot`, `from` and `to`.
 
-Verification failures are reported as `FAILED` (not `REJECTED`) so that `abortConfig` can count them; `REJECTED` is reserved for unsupported job operations.
+Verification failures are reported as `FAILED` (not `REJECTED`) so that `abortConfig` can count them; `REJECTED` is reserved for unsupported job operations (a path the tests do not exercise, so its behaviour against real Jobs is unverified).
 
 ### Shadow (reported)
 ```json
 { "state": { "reported": { "version": "1.0.0", "slot": "A", "status": "STABLE", "security_version": 2 } } }
 ```
+The health gate's cloud heartbeat is also a shadow update (it adds `last_heartbeat` to `reported`), so it needs no extra topic or policy statement.
 
 ### MQTT topics used
 ```
-$aws/things/<thing>/jobs/notify-next
-$aws/things/<thing>/jobs/start-next
-$aws/things/<thing>/jobs/<jobId>/update
+$aws/things/<thing>/jobs/start-next                 (+ /accepted, /rejected replies)
+$aws/things/<thing>/jobs/<jobId>/update             (+ /accepted, /rejected replies)
 $aws/things/<thing>/shadow/update
 ```
 
@@ -306,11 +314,11 @@ $aws/things/<thing>/shadow/update
 
 | Config | Purpose | Example for the demo |
 |---|---|---|
-| `rolloutConfig.maximumPerMinute` | Pace of rollout; sets how many devices get a bad image before the first failure reports back | 4 devices per minute |
+| `jobExecutionsRolloutConfig.maximumPerMinute` | Pace of rollout; sets how many devices get a bad image before the first failure reports back | 4 devices per minute |
 | `abortConfig` (failureType `ALL`, `CANCEL`) | Cancels the job when failures cross a threshold | 20% after at least 5 devices have executed |
 | `timeoutConfig.inProgressTimeoutInMinutes` | Marks an execution `TIMED_OUT` when a device goes silent mid-update | 1 to 2 minutes (the minimum is 1 minute) |
 
-Too fast a rollout defeats abort: every device has the bad image before the first failure is counted. Tune pace and threshold together and record the result in S9.
+Too fast a rollout defeats abort: every device has the bad image before the first failure is counted. The abort also cannot fire before `minNumberOfExecutedThings` devices have run, so that number is a floor on exposure. Tune pace and threshold together; S9 measures both a slow and a fast rollout (see `docs/RESULTS.md`). A staged rollout hands devices their job over several minutes, so the device has a `--watch` mode that keeps polling instead of checking once.
 
 ---
 
@@ -335,12 +343,12 @@ All AWS infrastructure is created and destroyed by Terraform. Releases (jobs) ar
 ```
 infra/terraform/
   versions.tf        # provider + terraform version pins
-  variables.tf       # region, device_count, name_prefix
+  variables.tf       # region, device_count (default 20), name_prefix
   s3.tf              # bucket, public access block, versioning, encryption
   kms.tf             # signing key + alias
   iot.tf             # thing group, things, policy, certificates, attachments
   iam.tf             # role IoT assumes to presign S3 URLs
-  outputs.tf         # iot endpoint, bucket, key id, role arn, cert PEMs
+  outputs.tf         # iot endpoint, bucket, key id, role arn, cert PEMs (marked sensitive)
   terraform.tfvars.example
 ```
 
@@ -428,21 +436,26 @@ terraform init
 terraform plan -out tf.plan
 terraform apply tf.plan
 terraform output -json > ../../build/tf-outputs.json
-../../scripts/export_certs.sh        # writes certificate PEMs next to each device key
-# ...run tests / demo...
-terraform destroy
+cd ../.. && scripts/export_certs.sh  # writes certificate PEMs next to each device key
+python -m cloud.publish export-pubkey   # the device's trusted key, exported from KMS
+make test-e2e                        # scenarios against real AWS
+python scripts/fleet_demo.py         # S9
+make results
+make tf-destroy                      # terraform destroy
 ```
 
 ### Terraform decisions
 - **T1, scope:** Terraform owns long-lived infrastructure; `publish.py` owns releases and jobs, because a release is an event with a lifecycle, not a resource to keep in sync.
-- **T2, keys stay out of state:** device private keys are generated locally and only CSRs are passed to Terraform, so the state file holds public certificate material only. (The alternative, letting Terraform generate the key pair, would put private keys in state.)
+- **T2, keys stay out of state:** device private keys are generated locally and only CSRs are passed to Terraform, so the state file holds certificates and resource ARNs but no device private keys. The state is still treated as sensitive and never committed (`*.tfstate*` is git-ignored). The CSRs use RSA-2048 keys, and `gen_device_csrs.sh` never regenerates an existing key or CSR, because a changed CSR would make Terraform replace the certificate. (The alternative, letting Terraform generate the key pair, would put private keys in state.)
 - **T3, state:** local backend for the project. An S3 backend with locking is the next step for a team; noted under future work.
 - **T4, teardown:** `terraform destroy` removes everything; the KMS key enters its 7-day deletion window.
-- **T5, hygiene:** pinned provider versions, `terraform fmt -check` and `terraform validate` in CI, plus `tflint` or `checkov` as an optional security scan.
+- **T5, hygiene:** a pinned provider version range and a committed lock file; `terraform fmt -check` and `terraform validate` run in CI. A `tflint` or `checkov` scan was considered and not added.
 
 ---
 
 ## 7. What is simulated and what is real
+
+Standalone copies of this section and of the limits below are [SIMULATED-VS-REAL.md](SIMULATED-VS-REAL.md) and [LIMITATIONS.md](LIMITATIONS.md).
 
 ### Be precise in the README
 | Component | In this project | Real-world equivalent |
@@ -503,10 +516,10 @@ Two slots; update the inactive one; switch with one atomic pointer write. In-pla
 KMS signs the SHA-256 of the canonical manifest, which contains the image hash, version, and `security_version`. Signing only the image would let an attacker pair a valid image with altered metadata. S3c tests exactly this. Alternative noted: AWS Signer with IoT code-signing jobs.
 
 ### Decision 3: Monotonic `security_version` for downgrade protection
-The device rejects any release with a lower `security_version` than its committed value, even if validly signed. `version` is for humans and may go down (S4b) when the release team intentionally rolls back, as long as the security floor holds.
+The device rejects any release with a lower `security_version` than its committed value, even if validly signed. `version` is for humans and may go down (S4b) when the release team intentionally rolls back, as long as the security floor holds. The stored value is raised only at commit, never during a trial, so a rollback never raises the floor.
 
 ### Decision 4: What "healthy" means
-Healthy only if **all** hold within the trial deadline: the process stays alive, a local self-test passes, and the device can still connect to IoT Core and publish a heartbeat. The connectivity check exists because firmware that breaks connectivity is the classic way to strand a remote device. **The check retries within the window**, so a short blip (S6c) does not cause a false rollback, while a long outage (S6d) does.
+Healthy only if **all** hold within the trial deadline: the process stays alive for a minimum window (so firmware that passes and then dies seconds later is not committed), a local self-test passes, and the device can still connect to IoT Core and publish a heartbeat. The connectivity check exists because firmware that breaks connectivity is the classic way to strand a remote device. **The check retries within the window**, so a short blip (S6c) does not cause a false rollback, while a long outage (S6d) does.
 
 ### Decision 5: Silence is a failure
 Both layers treat "no confirmation" as failure. On the device, an unconfirmed `TRIAL` with no attempts left rolls back. In the cloud, `timeoutConfig` turns a vanished device into `TIMED_OUT`, which `abortConfig` can count. A device that never reports is the one you most need to treat as failed.
@@ -518,10 +531,12 @@ One trial attempt. A power cut during trial (P7 to P9) rolls back and costs one 
 Write temp file, `fsync`, `os.replace`, `fsync` directory; `state.json` is the only commit point. After writing the inactive slot, read it back and re-hash it before switching, so a torn slot write is never promoted.
 
 ### Decision 8: Staged rollout and automatic abort
-Slow `rolloutConfig` plus an `abortConfig` threshold define blast radius. A low threshold means fewer bad installs but more false aborts from one flaky device. S9 records the numbers.
+Slow `rolloutConfig` plus an `abortConfig` threshold define blast radius. A low threshold means fewer bad installs but more false aborts from one flaky device. S9 records the numbers (`docs/RESULTS.md`). The abort cannot fire before its minimum number of executed devices, so that number is a floor on exposure.
 
 ### Decision 9: Identity and exposure
 Per-device X.509 cert, least-privilege policy by thing name, S3 reachable only through expiring presigned URLs, signing key only in KMS, device private keys never in Terraform state.
+
+Short per-decision notes with the scenarios that prove each one are in [decisions/](decisions/).
 
 ---
 
@@ -529,35 +544,46 @@ Per-device X.509 cert, least-privilege policy by thing name, S3 reachable only t
 
 ```
 failsafe-ota/
-  README.md                  # leads with the failure matrix + terminal recording
-  Makefile                   # test-unit, test-failures, test-e2e, tf-apply, tf-destroy
+  README.md                  # failure matrix and headline numbers first
+  Makefile                   # test-unit, test-failures, test-e2e, results, demo, tf-init/apply/destroy
+  requirements.txt  pytest.ini  .gitignore
   docs/
     design.md                # this document
-    RESULTS.md               # generated by the runner
-    decisions/               # one short file per decision
-    evidence/                # log excerpts per scenario
+    RESULTS.md               # generated by scripts/make_results.py
+    SIMULATED-VS-REAL.md     # what is simulated, what is real, porting path
+    LIMITATIONS.md           # what the project does not prove
+    decisions/               # one short note per decision
+    evidence/                # per-scenario logs: local, and aws/ for real AWS
   device/
-    updater.py               # jobs client + state machine
-    slots.py                 # slot management + atomic writes
-    verify.py                # signature, hash, size, downgrade checks
+    updater.py               # jobs client + state machine (+ --watch mode)
+    slots.py                 # slots, atomic state writes, slot writes
+    verify.py                # signature, schema, downgrade, size, hash
     health.py                # health gate (alive, self-test, cloud heartbeat)
     faults.py                # test-only fault injection hooks
-    firmware/                # fake fw: good, crash-now, crash-later, no-cloud, hang
-    trusted_pubkey.pem
+    transport.py             # exceptions shared by both transports
+    aws_transport.py         # real IoT Jobs/Shadow over MQTT, firmware over HTTPS
+    provision.py             # create or reset a simulated device directory
+    firmware/                # fake fw: good, crash_now, crash_later, no_cloud, hang, selftest_fail
   cloud/
-    publish.py               # build, manifest, KMS sign, S3 upload, create job
-    fake_jobs.py             # local Jobs transport for L2 tests
+    publish.py               # build, KMS sign, S3 upload, create job (rollout/abort/timeout)
+    release.py               # release builder, with tamper modes for the tests
+    signing.py               # LocalSigner (tests) and KmsSigner
+    fake_jobs.py             # file-backed fake Jobs/Shadow/S3 for L2
   infra/terraform/           # see section 6
   scripts/
-    gen_device_csrs.sh
-    export_certs.sh
+    gen_device_csrs.sh       # device keys + CSRs (kept local)
+    export_certs.sh          # certificates from Terraform outputs, Amazon root CA
+    fleet_demo.py            # S9: 20 devices, bad release, rollout + abort
+    make_results.py          # RESULTS.md and README headline from the evidence logs
   tests/
-    scenarios.yaml           # expected results per scenario
-    test_verify.py           # L1
-    test_state_atomicity.py  # L1
+    scenarios.yaml           # expected result per scenario
+    harness.py               # runs a scenario, checks invariants I1 to I7
+    run_scenarios.py         # runs the local matrix, writes evidence + README matrix
+    test_verify.py  test_state_atomicity.py  test_publish.py
+    test_aws_transport.py  test_watch.py  test_make_results.py     # L1
     test_scenarios_local.py  # L2: full matrix + all crash points
-    test_e2e_aws.py          # L3
-    run_scenarios.py         # runs matrix, checks invariants, writes RESULTS.md
+    test_e2e_aws.py          # L3: opt-in, real AWS
+  build/                     # git-ignored: device keys, certificates, Terraform outputs, simulated devices
   .github/workflows/ci.yml   # L1 + L2, terraform fmt/validate
 ```
 
@@ -565,61 +591,56 @@ failsafe-ota/
 
 ## 10. Build plan (about 4 to 5 days, ~25 hours)
 
+Checked boxes are done.
+
 This is longer than a bare-bones version because failure testing and Terraform are now deliverables.
 
 ### Day 1: device core and fault hooks (~6 h)
-- [ ] Slot model, `state.json`, atomic write helper, leftover `.tmp` cleanup
-- [ ] `verify.py` (signature, hash, size, downgrade) with a local ECDSA keypair
-- [ ] State machine through `TRIAL`, `COMMITTED`, `ROLLED_BACK`, including read-back verify
-- [ ] `faults.py` with named crash points P1 to P10
-- [ ] Fake firmware variants (good, crash-now, crash-later, no-cloud, hang)
+- [x] Slot model, `state.json`, atomic write helper, leftover `.tmp` cleanup
+- [x] `verify.py` (signature, hash, size, downgrade) with a local ECDSA keypair
+- [x] State machine through `TRIAL`, `COMMITTED`, `ROLLED_BACK`, including read-back verify
+- [x] `faults.py` with named crash points P1 to P10
+- [x] Fake firmware variants (good, crash-now, crash-later, no-cloud, hang)
 
 ### Day 2: local scenario matrix (~5 h)
-- [ ] `fake_jobs.py` transport and `tests/scenarios.yaml`
-- [ ] Invariant checker (I1 to I7)
-- [ ] S1 to S8 passing locally in `run_scenarios.py`
-- [ ] CI runs L1 and L2
+- [x] `fake_jobs.py` transport and `tests/scenarios.yaml`
+- [x] Invariant checker (I1 to I7)
+- [x] S1 to S8 passing locally in `run_scenarios.py`
+- [x] CI runs L1 and L2
 
 ### Day 3: Terraform and AWS integration (~6 h)
-- [ ] Terraform: S3, KMS, IoT things/group/policy, CSR-based certs, IAM role, outputs
-- [ ] `gen_device_csrs.sh`, `export_certs.sh`
-- [ ] `publish.py`: manifest, KMS sign, upload, create job with `presignedUrlConfig`
-- [ ] Device wired to real Jobs topics, `statusDetails`, shadow reporting
-- [ ] S1 to S4 pass end to end on AWS
+- [x] Terraform: S3, KMS, IoT things/group/policy, CSR-based certs, IAM role, outputs
+- [x] `gen_device_csrs.sh`, `export_certs.sh`
+- [x] `publish.py`: manifest, KMS sign, upload, create job with `presignedUrlConfig`
+- [x] Device wired to real Jobs topics, `statusDetails`, shadow reporting
+- [x] S1 to S4 pass end to end on AWS
 
 ### Day 4: cloud failure cases and fleet (~5 h)
-- [ ] S5, S6, S7 on AWS (S7b and S7c need a 1 to 2 minute job timeout)
-- [ ] Representative S8 subset (P4, P7, P10) through real Jobs
-- [ ] 20-device fleet, `rolloutConfig` and `abortConfig` (S9); record devices exposed
+- [x] S5, S6, S7 on AWS (S7b and S7c need a 1 to 2 minute job timeout)
+- [x] Representative S8 subset (P4, P7, P10) through real Jobs
+- [x] 20-device fleet, `rolloutConfig` and `abortConfig` (S9); record devices exposed
 
 ### Day 5: evidence and writeup (~4 h)
-- [ ] Generate `RESULTS.md`, collect evidence logs, record terminal run
-- [ ] Decision notes, README with failure matrix first, diagrams
-- [ ] Terraform `fmt` / `validate` in CI; optional `tflint` or `checkov`
+- [x] Generate `RESULTS.md` and collect evidence logs
+- [ ] Record the terminal run (optional: `make demo`)
+- [x] Decision notes, README with failure matrix first, diagrams
+- [x] Terraform `fmt` / `validate` in CI (`tflint` / `checkov` not added)
 
 **If time runs short, cut in this order:** (1) S9 fleet demo, (2) the L3 S8 subset, (3) `checkov`, (4) S2b, S3b, S6c, S6d variants. Do not cut the L2 matrix, the invariants, or Terraform.
 
 ---
 
-## 11. Results (generated; fill from `RESULTS.md`)
+## 11. Results
 
-| Scenario | Expected | Observed | Invariants I1 to I7 | Pass |
-|---|---|---|---|---|
-| S1 baseline | SUCCEEDED | | | |
-| S2a, S2b tampered / truncated image | Rejected pre-install | | | |
-| S3a, S3b, S3c invalid signatures | Rejected pre-install | | | |
-| S4a downgrade / S4b allowed rollback | Rejected / installed | | | |
-| S5a, S5b firmware crashes | Rolled back | | | |
-| S6a to S6d cloud connectivity | See 2.5 | | | |
-| S7a to S7c device disappears | Rollback / `TIMED_OUT` / recovery | | | |
-| S8 P1 to P10 power cuts | See 2.6 | | | |
-| S9 bad fleet release | Aborted early | | | |
+Results are generated, not written here. `make results` builds [RESULTS.md](RESULTS.md) from the evidence logs and fills the README's headline numbers:
 
-**Headline numbers to record**
-- Cases passed: `__ / __` (L2) and `__ / __` (L3)
-- Crash points with zero unrunnable devices: `__ / 10`
-- Devices that received the bad image before abort: `__ / 20`
-- Time from bad install to completed rollback: `__ s`
+- Local failure matrix (simulated cloud): cases passed.
+- Real AWS: scenarios passed.
+- Power-cut points that leave no unrunnable device (S8, P1 to P10).
+- Bad fleet release: devices that got the bad image, at a slow and at a fast rollout rate, and the job's final status.
+- Time from bad install to a reported rollback.
+
+RESULTS.md also lists every scenario with its expected outcome and a link to its log, local and AWS side by side. A scenario with no log shows as "not run".
 
 ---
 
@@ -627,11 +648,11 @@ This is longer than a bare-bones version because failure testing and Terraform a
 
 - IoT Core messages, Jobs, S3, and Terraform itself cost pennies at this scale.
 - A KMS key costs about a dollar per month prorated, plus a small per-request fee.
-- **Teardown:** `terraform destroy`. The KMS key is scheduled for deletion (7-day window set in Terraform). Delete local `build/devices/` private keys.
+- **Teardown:** `make tf-destroy` (`terraform destroy`). The KMS key is scheduled for deletion (7-day window set in Terraform). Delete local `build/devices/` private keys.
 
 ---
 
-## 13. Interview questions this prepares you for
+## 13. Design FAQ
 
 - *"What if power dies mid-write?"* Only the inactive slot is touched until one atomic pointer write; the 10-point crash table shows each outcome. In the simulator I can show ordering; real flash durability needs hardware testing.
 - *"How do you stop downgrade attacks?"* Monotonic `security_version` inside the signed manifest (S4a), while allowing intentional `version` rollbacks (S4b).
@@ -651,11 +672,25 @@ This is longer than a bare-bones version because failure testing and Terraform a
 - Remote Terraform state (S3 backend with locking), CI-driven `plan`.
 - Delta updates, encrypted images, multi-signer release approval.
 - Per-wave health analysis before proceeding to the next rollout wave.
+- Real network fault injection for the AWS scenarios (today the S6 outages are injected inside the device's transport).
+- Run the fleet across several machines, and verify how real Jobs treats `REJECTED` and in-flight executions when a job is aborted.
+- A `tflint` or `checkov` pass over the Terraform.
 
 ---
 
-## 15. Resume bullets
+## 15. As built: changes from the original plan
 
-- Built a failure-first OTA firmware update pipeline on AWS IoT Jobs with KMS-signed manifests, health-gated automatic rollback, and downgrade protection, tested against a simulated A/B-slot device (Python).
-- Designed and automated a ~35-case failure matrix (tampered images, forged signatures, downgrade attempts, crashing and silent firmware, cloud loss, power cuts at 10 install stages) with seven post-condition invariants checked on every run.
-- Provisioned the full AWS stack (IoT Core, S3, KMS, IAM) with Terraform; limited blast radius of a faulty release across a 20-device simulated fleet using staged rollout, abort thresholds, and job timeouts.
+| Area | Plan | As built | Why |
+|---|---|---|---|
+| Local cases | about 35 | 28 | S7b and S7c are one sequence (`S7bc`); S9 is AWS-only; the S3b and S3c variants are counted individually |
+| AWS cases | about 15 | 21, plus the S9 fleet runs | every no-fault scenario, plus S6b to S6d, S7bc and S8 P4, P7, P10 |
+| State file | six fields | adds `previous` and `pending_job` | a restart must know where to roll back to and which outcome to report (section 3) |
+| Health gate | alive, self-test, heartbeat | also a minimum-alive window | firmware that passes then dies seconds later (S5b) must not be committed |
+| Reason codes | eight | adds `MANIFEST_INVALID`, `DOWNLOAD_FAILED` | a signed but malformed manifest; a missing artifact |
+| Job pickup | `notify-next`, then `start-next` | `start-next` polling, plus a `--watch` mode | simpler; a restarted device gets its `IN_PROGRESS` job back (proved by the S8 and S7 AWS runs); staged rollouts need devices that keep polling |
+| Timings | S5b crashes after 3 s | 0.4 s, with short health windows | the whole local matrix runs in well under a minute |
+| S6 on AWS | `net_fault` | injected in the device's transport, not real packet loss | no safe way to cut a real connection mid-test |
+| Device certificates | from CSRs | RSA-2048 CSRs, never regenerated once created | CSR-based creation is supported for RSA; a changed CSR would replace the certificate |
+| Results report | written by the test runner | `scripts/make_results.py` from evidence logs | one source of truth for the README and RESULTS.md |
+| Terraform scan | optional `tflint` / `checkov` | `fmt` and `validate` only | cut for time, as the plan allowed |
+| Certificate output | PEMs | marked `sensitive` | the AWS provider marks the attribute sensitive |

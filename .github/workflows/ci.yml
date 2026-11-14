@@ -1,5 +1,6 @@
 name: ci
 on: [push, pull_request]
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -8,4 +9,19 @@ jobs:
       - uses: actions/setup-python@v5
         with: {python-version: "3.12"}
       - run: pip install -r requirements.txt
-      - run: python -m pytest -q          # L1 + L2
+      - run: python -m pytest -q          # L1 + L2; the AWS scenarios skip themselves
+
+  terraform:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: infra/terraform
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+      - run: terraform fmt -check -recursive
+      # the certificates read local CSRs, so generate throwaway ones for validation
+      - run: scripts/gen_device_csrs.sh 20
+        working-directory: .
+      - run: terraform init -backend=false
+      - run: terraform validate

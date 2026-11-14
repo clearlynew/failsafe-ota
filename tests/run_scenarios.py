@@ -1,4 +1,7 @@
-"""Run the whole matrix and write docs/RESULTS.md + results.json.   python -m tests.run_scenarios"""
+"""Run the whole local matrix; write docs/evidence/*.log, results.json, the README matrix.
+
+    python -m tests.run_scenarios      then      python scripts/make_results.py
+"""
 import json
 import tempfile
 from concurrent.futures import ThreadPoolExecutor
@@ -31,8 +34,7 @@ def main() -> int:
         rows.append(f"| {r.id} | {r.name} | {exp} | {obs} | {inv} | {'PASS' if r.passed else 'FAIL'} |")
     passed = sum(r.passed for _, r in results)
     md = f"# Failure results (L2, local fake Jobs transport)\n\n**Cases passed: {passed} / {len(results)}**\n\n" + "\n".join(rows) + "\n"
-    (ROOT / "docs").mkdir(exist_ok=True)
-    (ROOT / "docs" / "RESULTS.md").write_text(md)
+    (ROOT / "docs").mkdir(exist_ok=True)       # docs/RESULTS.md is written by scripts/make_results.py
     (ROOT / "results.json").write_text(json.dumps(
         [{"id": r.id, "passed": r.passed, "failures": r.failures, "observed": r.observed,
           "invariants": r.invariants} for _, r in results], indent=2))

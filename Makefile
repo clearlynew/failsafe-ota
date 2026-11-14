@@ -28,3 +28,12 @@ test-e2e:
 .PHONY: tf-init tf-apply tf-destroy
 
 .PHONY: setup test-unit test-failures test-all
+
+
+results:
+	$(PY) scripts/make_results.py
+
+demo:
+	asciinema rec docs/demo.cast -c "make test-failures"
+
+.PHONY: results demo

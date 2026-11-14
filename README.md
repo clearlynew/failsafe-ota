@@ -1,9 +1,29 @@
 # failsafe-ota
 
-A failure-first OTA update protocol for AWS IoT. Devices are **simulated** (Python A/B slot model);
-this is not a bootloader. Full design: [docs/design.md](docs/design.md).
+A failure-first over-the-air update protocol for AWS IoT. The point is not that updates work, but
+that when they fail (tampered image, forged signature, downgrade attack, crashing or silent
+firmware, lost connectivity, power cut at any install stage, a bad release across a fleet) the
+device ends up on a known-good image, and that this is **tested**, not claimed.
 
-## Failure results
+The device is a Python A/B-slot **simulation**, not a bootloader. The cloud side is real: IoT Core
+Jobs and Shadow, S3, KMS, IAM, all in Terraform. See
+[what is simulated and what is real](docs/SIMULATED-VS-REAL.md) and
+[known limitations](docs/LIMITATIONS.md).
+
+## Headline results
+
+<!-- HEADLINE:START -->
+- **Local failure matrix (simulated cloud):** 28 / 28 cases pass
+- **Real AWS (KMS, S3, IoT Jobs, Shadow):** 21 / 21 scenarios pass
+- **Power-cut points that leave no unrunnable device (S8, P1 to P10):** 10 / 10
+- **Bad fleet release (4/min, abort at 20.0% after 5 executed):** 5 / 20 devices got the bad image; job CANCELED after 78s; devices left on it: 0
+- **Bad fleet release (20/min, abort at 20.0% after 5 executed):** 9 / 20 devices got the bad image; job CANCELED after 21s; devices left on it: 0
+- **Bad install to rollback reported (average, slowest-rollout run):** 5.7 s
+<!-- HEADLINE:END -->
+
+Full table with links to every log: [docs/RESULTS.md](docs/RESULTS.md).
+
+## Failure matrix (local, simulated cloud)
 
 <!-- MATRIX:START -->
 **28 / 28 local failure cases pass**
@@ -40,52 +60,75 @@ this is not a bootloader. Full design: [docs/design.md](docs/design.md).
 | S8-P10 | Power cut at post_commit | SUCCEEDED, v1.1.0 | SUCCEEDED, v1.1.0 | all | PASS |
 <!-- MATRIX:END -->
 
-Per-scenario logs: `docs/evidence/`. Regenerate with `make test-failures`.
+Seven checks run after **every** scenario, not only the pass/fail result: the active slot's hash
+matches the state file, the state file always parses, only signed images are ever active, the
+security floor never decreases, the device is never left mid-trial, the job reports the right
+outcome, and the cloud's idea of the version matches the device.
 
-## Run it on your machine
+## How an update works
 
-Needs Python 3.10+ (tested on 3.12). No AWS account needed for this stage.
+1. Fetch the manifest and signature; verify the signature, then the downgrade floor.
+2. Download the image; verify size and SHA-256.
+3. Write it to the **inactive** slot, read it back, re-hash it.
+4. One atomic write (`state.json`) switches the active slot and starts a trial.
+5. Health gate: the new image must stay alive, pass its self-test and still reach the cloud.
+6. Commit (raise the security floor) or roll back; report the outcome to the job; update the shadow.
+
+Power can be cut at any of ten named points in that sequence (S8). Design notes live in
+[docs/decisions/](docs/decisions/) and the full design in [docs/design.md](docs/design.md).
+
+## Run it locally (no AWS needed)
+
+Python 3.10 or newer; Linux, macOS or WSL.
 
 ```bash
-cd failsafe-ota
-python3 -m venv .venv
-source .venv/bin/activate          # Windows: .venv\Scripts\activate
+python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-
-make test-unit                     # L1: verification + atomic write tests (~1 s)
-make test-failures                 # L2: full scenario matrix, writes docs/RESULTS.md (~15 s)
-pytest -q                          # everything, via pytest
-pytest -q -k S8-P7                 # a single scenario
+pytest -q                          # unit tests + the 28-case local matrix (~35 s)
+make test-failures                 # re-run the matrix, rewrite the evidence logs and matrix above
+make results                       # regenerate docs/RESULTS.md and the headline numbers
 ```
-On Windows without `make`, run the `python -m ...` commands from the Makefile directly.
 
-## What exists so far (Day 1-2 of the build plan)
+## Run it on AWS (optional; costs pennies)
+
+Needs an AWS account with credentials configured, Terraform and the AWS CLI.
+
+```bash
+scripts/gen_device_csrs.sh 20              # keys + CSRs stay in build/ (gitignored)
+make tf-init && make tf-apply              # S3, KMS, IoT things/policy/certs, IAM
+(cd infra/terraform && terraform output -json > ../../build/tf-outputs.json)
+scripts/export_certs.sh
+python -m cloud.publish export-pubkey      # the device's trusted key, from KMS
+make test-e2e                              # the scenarios against real AWS (~10 min)
+python scripts/fleet_demo.py               # S9: bad release across 20 devices
+make results
+make tf-destroy                            # tear it all down
+```
+
+The KMS key costs about a dollar a month, prorated; the rest is pennies at this scale. Never commit
+anything under `build/` (device private keys) or any `*.tfstate` file.
+
+## Layout
 
 | Path | Role |
 |---|---|
-| `device/updater.py` | Jobs client + state machine (download, verify, write, flip, trial, commit/rollback) |
-| `device/slots.py` | A/B slots and the single atomic commit (`state.json`: tmp, fsync, replace, fsync dir) |
-| `device/verify.py` | Signature, schema, downgrade floor, size, hash |
-| `device/health.py` | Health gate: alive + self-test + cloud heartbeat, with a deadline |
-| `device/faults.py` | Crash points (`os._exit(137)`) and network blackholes, env-var driven |
-| `device/firmware/` | Fake firmware: good, crash_now, crash_later, no_cloud, hang, selftest_fail |
-| `cloud/fake_jobs.py` | File-backed fake of IoT Jobs/Shadow/S3 so crashes survive across processes |
-| `cloud/release.py`, `signing.py` | Build + sign releases locally (ECDSA P-256), with 7 tamper modes |
-| `tests/scenarios.yaml` | Expected outcome for every scenario |
-| `tests/harness.py` | Runs each scenario in subprocesses and checks invariants I1-I7 |
+| `device/` | Updater state machine, A/B slots, verification, health gate, fault hooks, real AWS transport |
+| `cloud/` | Release builder and signers (local and KMS), `publish.py`, the file-backed fake cloud |
+| `infra/terraform/` | All AWS resources |
+| `scripts/` | Device CSRs and certificates, the fleet demo, the results generator |
+| `tests/` | Scenario catalog (`scenarios.yaml`), harness, unit tests, opt-in AWS tests |
+| `docs/` | Design, decisions, results, evidence logs, limitations |
 
-## Not built yet (Day 3-5)
+## Design decisions
 
-- `infra/terraform/` (S3, KMS, IoT things/policy/certs, IAM)
-- `cloud/publish.py` (KMS signing, real S3 upload, real IoT Job with rollout/abort/timeout)
-- Real IoT transport in the device (`awsiotsdk`) and the L3 end-to-end tests
-- S9 fleet abort demo
+[A/B slots](docs/decisions/0001-ab-slots.md) ·
+[Sign the manifest](docs/decisions/0002-sign-the-manifest.md) ·
+[Security version](docs/decisions/0003-security-version.md) ·
+[What healthy means](docs/decisions/0004-what-healthy-means.md) ·
+[Silence is failure](docs/decisions/0005-silence-is-failure.md) ·
+[One trial attempt](docs/decisions/0006-one-trial-attempt.md) ·
+[Atomic commit](docs/decisions/0007-atomic-commit-and-verify-after-write.md) ·
+[Rollout and abort](docs/decisions/0008-staged-rollout-and-abort.md) ·
+[Identity and exposure](docs/decisions/0009-identity-and-exposure.md)
 
-The device talks to the cloud only through the transport interface in `device/transport.py`
-and the methods on `FakeJobs` (`start_next`, `update_job`, `fetch`, `heartbeat`, `update_shadow`),
-so the AWS version is a drop-in class with the same methods.
-
-## Known limitation
-
-`os._exit` proves write *ordering* and the commit point, not durability against a real power cut
-(OS page cache). See design section 2.3.
+Terminal recording of the full local failure run: `docs/demo.cast` (`asciinema play docs/demo.cast`).
